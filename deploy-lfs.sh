@@ -1,76 +1,60 @@
 #!/bin/bash
 # deploy-lfs.sh
 
-# Config check
+# Config check and menu
 if [ ! -f "config.env" ]; then
     cp config.env.template config.env
 fi
 
-echo "Please edit config.env with your credentials before continuing."
-echo "Options:"
-echo "1. Edit now using nano"
-echo "2. I've already edited config.env"
-echo "3. Exit to edit manually"
-read -p "Choose option (1-3): " choice
+echo "Options: 1.Edit now (nano) 2.Use existing config 3.Exit"
+read -p "Choose (1-3): " choice
 
 case $choice in
-    1)
-        nano config.env
-        read -p "Have you completed editing config.env? (y/n): " confirm
-        if [ "$confirm" != "y" ]; then
-            echo "Please edit config.env and run the script again"
-            exit 1
-        fi
-        ;;
-    2)
-        echo "Using existing config.env"
-        ;;
-    3)
-        echo "Edit config.env and run script again when ready"
-        exit 0
-        ;;
-    *)
-        echo "Invalid option"
-        exit 1
-        ;;
+    1) nano config.env
+       read -p "Config complete? (y/n): " confirm
+       [[ "$confirm" != "y" ]] && exit 1;;
+    2) echo "Using existing config";;
+    3) exit 0;;
+    *) exit 1;;
 esac
 
 source config.env
 
-# Validate config
-if [ -z "$GITHUB_TOKEN" ] || [ -z "$GITHUB_USERNAME" ] || [ -z "$GITHUB_EMAIL" ]; then
-    echo "Error: Required values missing in config.env"
-    exit 1
-fi
-
-# Setup directories
-mkdir -p $LFS_BASE_DIR/{repos,scripts,logs}
+# Setup server
+mkdir -p $LFS_BASE_DIR/{repos,objects,locks}
 chmod -R 755 $LFS_BASE_DIR
 
-# Install dependencies
-apt-get update
-apt-get install -y git git-lfs curl jq
-
-# Configure git
+# Install and configure
+apt-get update && apt-get install -y git git-lfs nginx curl jq
 git config --global user.name "$GITHUB_USERNAME"
 git config --global user.email "$GITHUB_EMAIL"
-git config --global credential.helper store
-echo "https://$GITHUB_TOKEN:x-oauth-basic@github.com" > ~/.git-credentials
 
-# Install Git LFS
-git lfs install --skip-repo
+# Configure Nginx for LFS
+cat > /etc/nginx/sites-available/git-lfs << EOF
+server {
+    listen 80;
+    server_name $LFS_SERVER_NAME;
+    
+    location /objects {
+        root $LFS_BASE_DIR;
+        autoindex off;
+    }
+    
+    location /locks {
+        root $LFS_BASE_DIR;
+        autoindex off;
+    }
+}
+EOF
 
-# Setup monitoring
-cp scripts/monitor.sh $LFS_BASE_DIR/scripts/
-chmod +x $LFS_BASE_DIR/scripts/monitor.sh
-(crontab -l 2>/dev/null; echo "0 * * * * $LFS_BASE_DIR/scripts/monitor.sh") | crontab -
+ln -sf /etc/nginx/sites-available/git-lfs /etc/nginx/sites-enabled/
+nginx -t && systemctl restart nginx
+
+# Configure Git LFS
+git config --global lfs.url "http://$LFS_SERVER_NAME/objects"
+git lfs install --skip-smudge
 
 # Run initial sync
-chmod +x scripts/sync-repos.sh
 ./scripts/sync-repos.sh
 
-# Setup GitHub Action
-chmod +x scripts/setup-action.sh
-./scripts/setup-action.sh
-
-echo "LFS deployment complete. Repositories synced and LFS enabled."
+echo "LFS server deployed at http://$LFS_SERVER_NAME"
